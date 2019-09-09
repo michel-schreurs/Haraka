@@ -17,6 +17,7 @@ const Notes       = require('haraka-notes');
 const utils       = require('haraka-utils');
 const Address     = require('address-rfc2821').Address;
 const ResultStore = require('haraka-results');
+const decodeProxy = require('@balena/proxy-protocol-parser').v2_decode;
 
 // Haraka libs
 const logger      = require('./logger');
@@ -433,8 +434,33 @@ class Connection {
                 return;
             }
             let this_line = this.current_data.slice(0, offset+1);
-            // Hack: bypass this code to allow HAProxy's PROXY extension
+
             if (this.state === states.PAUSE &&
+                this.proxy.allowed && decodeProxy(this.current_data))
+            {
+                let proxyDetails = decodeProxy(this.current_data);
+                if (proxyDetails) {
+                    if (this.proxy.timer) clearTimeout(this.proxy.timer);
+                    this.state = states.CMD;
+                    const offset = proxyDetails.remoteFamily === 'IPv4' ? 28 : 40;
+                    this.current_data = this.current_data.slice(offset);
+                    
+                    const proto = proxyDetails.remoteFamily === 'IPv4' ? 'TCP4' : 'TCP6';
+                    const src_ip = proxyDetails.remoteAddress;
+                    const dst_ip = proxyDetails.localAddress;
+                    const src_port = proxyDetails.remotePort;
+                    const dst_port = proxyDetails.localPort;
+                    this.process_line(`PROXY ${proto} ${src_ip} ${dst_ip} ${src_port} ${dst_port}`);
+                    const remainingLine = this_line.slice(offset);
+                    const matches = /^([^ ]*)( +(.*))?$/.exec(remainingLine);
+                    if (matches && matches[1]) {
+                        // process original cmd
+                        this.process_line(remainingLine);
+                    }
+                }
+            }
+            // Hack: bypass this code to allow HAProxy's PROXY extension
+            else if (this.state === states.PAUSE &&
                 this.proxy.allowed && /^PROXY /.test(this_line))
             {
                 if (this.proxy.timer) clearTimeout(this.proxy.timer);
